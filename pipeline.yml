@@ -1,0 +1,97 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: ci-cd-pipeline
+spec:
+  params:
+    - name: app-name
+      type: string
+      default: counter-service
+    - name: git-url
+      type: string
+      default: https://github.com/Tahir-CS/CI-CD-FINAL-PROJECT
+    - name: git-revision
+      type: string
+      default: master
+    - name: build-image
+      type: string
+      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/counter-service
+  workspaces:
+    - name: output
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: output
+    
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      runAfter:
+        - cleanup
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+      workspaces:
+        - name: output
+          workspace: output
+    
+    - name: flake8-lint
+      taskRef:
+        name: flake8
+        kind: ClusterTask
+      runAfter:
+        - git-clone
+      params:
+        - name: image
+          value: python:3.9-slim
+        - name: path
+          value: service
+        - name: requirements_file
+          value: requirements.txt
+      workspaces:
+        - name: source
+          workspace: output
+    
+    - name: nose-tests
+      taskRef:
+        name: nose
+      runAfter:
+        - flake8-lint
+      params:
+        - name: args
+          value: "-v --with-spec --spec-color --with-coverage --cover-package=app"
+      workspaces:
+        - name: source
+          workspace: output
+    
+    - name: build-image
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - nose-tests
+      params:
+        - name: IMAGE
+          value: $(params.build-image)
+      workspaces:
+        - name: source
+          workspace: output
+    
+    - name: deploy-app
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      runAfter:
+        - build-image
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -
+            oc expose deployment $(params.app-name) --port=5000 --dry-run=client -o yaml | oc apply -f -
+            oc expose service $(params.app-name) --dry-run=client -o yaml | oc apply -f -
